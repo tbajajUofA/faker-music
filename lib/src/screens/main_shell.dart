@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:youtube_player_iframe/youtube_player_iframe.dart';
+import 'package:youtube_player_iframe/youtube_player_iframe.dart' hide PlayerState;
 
 import '../models/playlist.dart';
 import '../models/track.dart';
