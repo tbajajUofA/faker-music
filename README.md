@@ -87,3 +87,9 @@ Physical phone should use `http://<your_laptop_lan_ip>:8787` in the app's backen
   - `backend/downloads/youtube-mp4`
 
 This keeps MP3 files in one dedicated folder to avoid clutter.
+
+## TODO
+- Add geolocation to get certain radio stations
+- Add preniunm account service
+- add yt, spotify login
+- customize button for backgrounds 
