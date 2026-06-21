@@ -1,10 +1,14 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart' as yt;
 
+/// Only MP3 is active in the phone-only flow. MP4 is kept so existing persisted
+/// source values and future video support do not need another model change.
 enum DownloadFormat { mp3, mp4 }
 
 class YoutubeSearchItem {
@@ -72,6 +76,7 @@ class YoutubeService {
   YoutubeService({
     Dio? dio,
     String? baseUrl,
+    yt.YoutubeExplode? youtube,
   })  : _baseUrl = _normalizeUrl(
           baseUrl ?? const String.fromEnvironment('BACKEND_URL', defaultValue: 'http://10.0.2.2:8787'),
         ),
@@ -81,9 +86,11 @@ class YoutubeService {
                 connectTimeout: const Duration(seconds: 2),
                 receiveTimeout: const Duration(seconds: 8),
               ),
-            );
+            ),
+        _youtube = youtube ?? yt.YoutubeExplode();
 
   final Dio _dio;
+  final yt.YoutubeExplode _youtube;
   String _baseUrl;
   final Map<String, ({DateTime createdAt, List<YoutubeSearchItem> items})> _cache =
       <String, ({DateTime createdAt, List<YoutubeSearchItem> items})>{};
@@ -95,28 +102,77 @@ class YoutubeService {
   }
 
   Future<List<YoutubeSearchItem>> search(String query) async {
-    final normalized = query.trim().toLowerCase();
-    final cached = _cache[normalized];
+    final normalized = query.trim();
+    if (normalized.isEmpty) return const <YoutubeSearchItem>[];
+
+    final cacheKey = normalized.toLowerCase();
+    final cached = _cache[cacheKey];
     if (cached != null && DateTime.now().difference(cached.createdAt) < _cacheTtl) {
       return cached.items;
     }
 
-    final response = await _requestWithFallback(
-      (url) => _dio.get(
-        '$url/search',
-        queryParameters: <String, dynamic>{'q': normalized},
-      ),
-    );
-    final data = response.data as Map<String, dynamic>;
-    final items = data['items'] as List<dynamic>? ?? <dynamic>[];
-    final parsed = items
-        .cast<Map<String, dynamic>>()
-        .map(YoutubeSearchItem.fromJson)
-        .toList();
-    _cache[normalized] = (createdAt: DateTime.now(), items: parsed);
+    final videos = await _youtube.search.search(normalized);
+    final parsed = videos.take(25).map((video) {
+      return YoutubeSearchItem(
+        videoId: video.id.value,
+        title: video.title,
+        channel: video.author,
+        thumbnail: _thumbnailFor(video),
+      );
+    }).toList();
+    _cache[cacheKey] = (createdAt: DateTime.now(), items: parsed);
     return parsed;
   }
 
+  Future<YoutubeDownloadResult> downloadWithFallback({
+    required YoutubeSearchItem item,
+    required DownloadFormat format,
+  }) {
+    return downloadOnDevice(item: item, format: format);
+  }
+
+  Future<YoutubeDownloadResult> downloadOnDevice({
+    required YoutubeSearchItem item,
+    required DownloadFormat format,
+  }) async {
+    if (format != DownloadFormat.mp3) {
+      throw UnsupportedError('Phone-only downloads currently support MP3 audio only.');
+    }
+
+    final supportDir = await getApplicationSupportDirectory();
+    final downloadDir = Directory(p.join(supportDir.path, 'youtube_mp3'));
+    final tempDir = Directory(p.join(supportDir.path, 'youtube_temp'));
+    if (!downloadDir.existsSync()) downloadDir.createSync(recursive: true);
+    if (!tempDir.existsSync()) tempDir.createSync(recursive: true);
+
+    final manifest = await _youtube.videos.streamsClient.getManifest(item.videoId);
+    final audio = manifest.audioOnly.withHighestBitrate();
+    final baseName = _safeFileName(item.title, fallback: item.videoId);
+    final sourceExt = audio.container.name;
+    final sourcePath = p.join(tempDir.path, '$baseName.$sourceExt');
+    final outputPath = await _uniqueOutputPath(downloadDir.path, baseName, 'mp3');
+
+    final stream = _youtube.videos.streamsClient.get(audio);
+    final output = File(sourcePath).openWrite();
+    await stream.pipe(output);
+
+    try {
+      await _transcodeToMp3(sourcePath: sourcePath, outputPath: outputPath);
+    } finally {
+      final sourceFile = File(sourcePath);
+      if (await sourceFile.exists()) {
+        await sourceFile.delete();
+      }
+    }
+
+    return YoutubeDownloadResult(
+      filePath: outputPath,
+      title: item.title,
+      thumbnail: item.thumbnail,
+    );
+  }
+
+  // Dormant backend/OAuth hooks retained for the future personalized feed work.
   Future<String> startLogin() async {
     final response = await _requestWithFallback((url) => _dio.get('$url/auth/youtube/start'));
     final payload = response.data as Map<String, dynamic>;
@@ -124,73 +180,28 @@ class YoutubeService {
   }
 
   Future<YoutubeAuthStatus> authStatus() async {
-    final response = await _requestWithFallback((url) => _dio.get('$url/auth/youtube/status'));
-    final payload = response.data as Map<String, dynamic>;
-    final loggedIn = payload['loggedIn'] as bool? ?? false;
-    if (!loggedIn) return const YoutubeAuthStatus(loggedIn: false);
-    final profile = payload['profile'] as Map<String, dynamic>? ?? <String, dynamic>{};
-    return YoutubeAuthStatus(
-      loggedIn: true,
-      profileTitle: profile['title'] as String?,
-      avatar: profile['avatar'] as String?,
-    );
+    return const YoutubeAuthStatus(loggedIn: false);
   }
 
-  Future<void> logout() async {
-    await _requestWithFallback((url) => _dio.post('$url/auth/youtube/logout'));
-  }
+  Future<void> logout() async {}
 
   Future<List<YoutubeSearchItem>> homeFeed() async {
-    final response = await _requestWithFallback((url) => _dio.get('$url/youtube/home'));
-    final payload = response.data as Map<String, dynamic>;
-    final items = payload['items'] as List<dynamic>? ?? <dynamic>[];
-    return items.cast<Map<String, dynamic>>().map(YoutubeSearchItem.fromJson).toList();
+    return const <YoutubeSearchItem>[];
   }
 
   Future<List<YoutubePlaylist>> playlists() async {
-    final response = await _requestWithFallback((url) => _dio.get('$url/youtube/playlists'));
-    final payload = response.data as Map<String, dynamic>;
-    final items = payload['items'] as List<dynamic>? ?? <dynamic>[];
-    return items.cast<Map<String, dynamic>>().map((json) {
-      return YoutubePlaylist(
-        id: json['id'] as String,
-        title: json['title'] as String? ?? 'Untitled',
-        itemCount: json['itemCount'] as int? ?? 0,
-        thumbnail: json['thumbnail'] as String? ?? '',
-      );
-    }).toList();
+    return const <YoutubePlaylist>[];
   }
 
   Future<List<YoutubeSearchItem>> playlistItems(String playlistId) async {
-    final response = await _requestWithFallback(
-      (url) => _dio.get('$url/youtube/playlists/$playlistId/items'),
-    );
-    final payload = response.data as Map<String, dynamic>;
-    final items = payload['items'] as List<dynamic>? ?? <dynamic>[];
-    return items.cast<Map<String, dynamic>>().map(YoutubeSearchItem.fromJson).toList();
+    return const <YoutubeSearchItem>[];
   }
 
   Future<List<YoutubeDownloadResult>> downloadPlaylist({
     required String playlistId,
     required DownloadFormat format,
   }) async {
-    final response = await _requestWithFallback(
-      (url) => _dio.post(
-        '$url/youtube/download/playlist',
-        data: <String, dynamic>{
-          'playlistId': playlistId,
-          'format': format.name,
-        },
-      ),
-    );
-    final payload = response.data as Map<String, dynamic>;
-    final items = payload['items'] as List<dynamic>? ?? <dynamic>[];
-    return items.cast<Map<String, dynamic>>().map((json) {
-      return YoutubeDownloadResult(
-        filePath: json['filePath'] as String,
-        title: json['title'] as String? ?? 'Untitled',
-      );
-    }).toList();
+    return const <YoutubeDownloadResult>[];
   }
 
   Future<YoutubeDownloadResult> downloadViaBackend({
@@ -212,48 +223,58 @@ class YoutubeService {
     final first = resultList.isNotEmpty ? resultList.first as Map<String, dynamic> : payload;
     return YoutubeDownloadResult(
       filePath: first['filePath'] as String,
-      title: first['title'] as String,
+      title: first['title'] as String? ?? 'Untitled',
       thumbnail: item.thumbnail,
     );
   }
 
-  Future<YoutubeDownloadResult> downloadWithFallback({
-    required YoutubeSearchItem item,
-    required DownloadFormat format,
+  Future<void> _transcodeToMp3({
+    required String sourcePath,
+    required String outputPath,
   }) async {
-    try {
-      return await downloadViaBackend(item: item, format: format);
-    } catch (_) {
-      return _downloadViaLocalFallback(item: item, format: format);
+    final session = await FFmpegKit.executeWithArguments(<String>[
+      '-y',
+      '-i',
+      sourcePath,
+      '-vn',
+      '-codec:a',
+      'libmp3lame',
+      '-b:a',
+      '192k',
+      outputPath,
+    ]);
+    final returnCode = await session.getReturnCode();
+    if (!ReturnCode.isSuccess(returnCode)) {
+      final logs = await session.getAllLogsAsString();
+      throw Exception('MP3 conversion failed: $logs');
     }
   }
 
-  Future<YoutubeDownloadResult> _downloadViaLocalFallback({
-    required YoutubeSearchItem item,
-    required DownloadFormat format,
-  }) async {
-    final supportDir = await getApplicationSupportDirectory();
-    final folder = Directory(p.join(supportDir.path, 'youtube_downloads'));
-    if (!folder.existsSync()) {
-      folder.createSync(recursive: true);
+  Future<String> _uniqueOutputPath(String directory, String baseName, String extension) async {
+    var candidate = p.join(directory, '$baseName.$extension');
+    var counter = 2;
+    while (await File(candidate).exists()) {
+      candidate = p.join(directory, '$baseName-$counter.$extension');
+      counter += 1;
     }
+    return candidate;
+  }
 
-    final ext = format == DownloadFormat.mp3 ? 'mp3' : 'mp4';
-    final sanitizedTitle = item.title.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-    final outputPath = p.join(folder.path, '$sanitizedTitle.$ext');
+  String _safeFileName(String value, {required String fallback}) {
+    final sanitized = value
+        .trim()
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (sanitized.isEmpty) return fallback;
+    return sanitized.length > 80 ? sanitized.substring(0, 80).trim() : sanitized;
+  }
 
-    final fallbackInfo = <String, dynamic>{
-      'videoId': item.videoId,
-      'title': item.title,
-      'format': format.name,
-      'createdAt': DateTime.now().toIso8601String(),
-    };
-    await File(outputPath).writeAsString(jsonEncode(fallbackInfo));
-    return YoutubeDownloadResult(
-      filePath: outputPath,
-      title: item.title,
-      thumbnail: item.thumbnail,
-    );
+  String _thumbnailFor(yt.Video video) {
+    final thumbnails = video.thumbnails;
+    return thumbnails.mediumResUrl.isNotEmpty
+        ? thumbnails.mediumResUrl
+        : thumbnails.standardResUrl;
   }
 
   Future<Response<dynamic>> _requestWithFallback(
@@ -285,5 +306,9 @@ class YoutubeService {
 
   static String _normalizeUrl(String value) {
     return value.trim().replaceAll(RegExp(r'/$'), '');
+  }
+
+  void close() {
+    _youtube.close();
   }
 }

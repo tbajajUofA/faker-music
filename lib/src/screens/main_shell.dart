@@ -2,8 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart' hide PlayerState;
 
 import '../models/playlist.dart';
@@ -33,24 +31,15 @@ class _MainShellState extends State<MainShell> {
   int _tabIndex = 0;
   final TextEditingController _searchController = TextEditingController();
   final TextEditingController _playlistController = TextEditingController();
-  final TextEditingController _backendUrlController = TextEditingController();
   List<YoutubeSearchItem> _searchItems = <YoutubeSearchItem>[];
-  List<YoutubeSearchItem> _homeItems = <YoutubeSearchItem>[];
-  List<YoutubePlaylist> _youtubePlaylists = <YoutubePlaylist>[];
   bool _searching = false;
   bool _downloading = false;
-  bool _authLoading = false;
-  bool _feedLoading = false;
-  YoutubeAuthStatus _authStatus = const YoutubeAuthStatus(loggedIn: false);
   Timer? _searchDebounce;
 
   @override
   void initState() {
     super.initState();
     widget.libraryService.addListener(_onLibraryUpdate);
-    _backendUrlController.text = widget.youtubeService.baseUrl;
-    _loadBackendUrl();
-    _refreshAuthAndFeed();
   }
 
   @override
@@ -59,7 +48,6 @@ class _MainShellState extends State<MainShell> {
     _searchDebounce?.cancel();
     _searchController.dispose();
     _playlistController.dispose();
-    _backendUrlController.dispose();
     super.dispose();
   }
 
@@ -94,7 +82,7 @@ class _MainShellState extends State<MainShell> {
       ),
       floatingActionButton: _tabIndex == 2
           ? FloatingActionButton.extended(
-              onPressed: _importLocalTracks,
+              onPressed: () => _importLocalTracks(),
               label: const Text('Import MP3'),
               icon: const Icon(Icons.file_upload),
             )
@@ -121,7 +109,7 @@ class _MainShellState extends State<MainShell> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Spotify Style Controls',
+                    'Phone-Only Music',
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
@@ -129,15 +117,25 @@ class _MainShellState extends State<MainShell> {
                     'Tracks: ${widget.libraryService.tracks.length} | Playlists: ${widget.libraryService.playlists.length}',
                   ),
                   const SizedBox(height: 12),
-                  if (_authLoading) const LinearProgressIndicator(),
-                  _buildAuthCard(),
+                  const Text(
+                    'YouTube search and MP3 downloads run directly on this phone. Personalized recommendations are paused for this iteration.',
+                  ),
                   const SizedBox(height: 12),
-                  if (_authStatus.loggedIn) _buildPersonalizedHome(),
-                  const SizedBox(height: 12),
-                  ElevatedButton.icon(
-                    onPressed: _importLocalTracks,
-                    icon: const Icon(Icons.audio_file),
-                    label: const Text('Import Local MP3s'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () => setState(() => _tabIndex = 1),
+                        icon: const Icon(Icons.search),
+                        label: const Text('Search YouTube'),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: () => _importLocalTracks(),
+                        icon: const Icon(Icons.audio_file),
+                        label: const Text('Import Local MP3s'),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -154,19 +152,6 @@ class _MainShellState extends State<MainShell> {
       child: Column(
         children: [
           TextField(
-            controller: _backendUrlController,
-            decoration: InputDecoration(
-              hintText: 'Backend URL (e.g. http://192.168.1.10:8787)',
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.save),
-                onPressed: _saveBackendUrl,
-                tooltip: 'Save backend URL',
-              ),
-            ),
-            onSubmitted: (_) => _saveBackendUrl(),
-          ),
-          const SizedBox(height: 8),
-          TextField(
             controller: _searchController,
             decoration: InputDecoration(
               hintText: 'Search YouTube songs',
@@ -176,13 +161,13 @@ class _MainShellState extends State<MainShell> {
               ),
             ),
             onSubmitted: (_) => _runSearch(),
-            onChanged: (value) {
+            onChanged: (_) {
               _searchDebounce?.cancel();
               _searchDebounce = Timer(const Duration(milliseconds: 450), _runSearch);
             },
           ),
           const SizedBox(height: 12),
-          if (_searching) const LinearProgressIndicator(),
+          if (_searching || _downloading) const LinearProgressIndicator(),
           Expanded(
             child: ListView.builder(
               itemCount: _searchItems.length,
@@ -194,24 +179,10 @@ class _MainShellState extends State<MainShell> {
                     onTap: () => _openPreview(item),
                     title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis),
                     subtitle: Text(item.channel),
-                    trailing: Wrap(
-                      spacing: 8,
-                      children: [
-                        IconButton(
-                          onPressed: _downloading
-                              ? null
-                              : () => _download(item, DownloadFormat.mp3),
-                          icon: const Icon(Icons.download_for_offline),
-                          tooltip: 'Download MP3',
-                        ),
-                        IconButton(
-                          onPressed: _downloading
-                              ? null
-                              : () => _download(item, DownloadFormat.mp4),
-                          icon: const Icon(Icons.movie),
-                          tooltip: 'Download MP4',
-                        ),
-                      ],
+                    trailing: IconButton(
+                      onPressed: _downloading ? null : () => _download(item),
+                      icon: const Icon(Icons.download_for_offline),
+                      tooltip: 'Download MP3',
                     ),
                   ),
                 );
@@ -226,7 +197,7 @@ class _MainShellState extends State<MainShell> {
   Widget _buildLibrary() {
     final tracks = widget.libraryService.tracks;
     if (tracks.isEmpty) {
-      return const Center(child: Text('No tracks yet. Import MP3 files to begin.'));
+      return const Center(child: Text('No tracks yet. Import MP3 files or download from YouTube.'));
     }
     return ListView.builder(
       padding: const EdgeInsets.all(16),
@@ -288,10 +259,6 @@ class _MainShellState extends State<MainShell> {
             ],
           ),
           const SizedBox(height: 12),
-          if (_authStatus.loggedIn) ...[
-            _buildYoutubePlaylistPanel(),
-            const SizedBox(height: 12),
-          ],
           Expanded(
             child: ListView.builder(
               itemCount: widget.libraryService.playlists.length,
@@ -307,19 +274,25 @@ class _MainShellState extends State<MainShell> {
                       onPressed: () => widget.libraryService.deletePlaylist(playlist.id),
                     ),
                     children: [
-                      for (final track in tracks)
+                      ListTile(
+                        leading: const Icon(Icons.audio_file),
+                        title: const Text('Add MP3 files'),
+                        onTap: () => _importLocalTracks(playlistId: playlist.id),
+                      ),
+                      for (var i = 0; i < tracks.length; i += 1)
                         ListTile(
-                          title: Text(track.title),
-                          onTap: () => _playTrackFromList(tracks, tracks.indexOf(track)),
+                          title: Text(tracks[i].title),
+                          subtitle: Text(tracks[i].artist),
+                          onTap: () => _playTrackFromList(tracks, i),
                           leading: GestureDetector(
-                            onTap: () => _playTrackFromList(tracks, tracks.indexOf(track)),
-                            child: _trackArtwork(track),
+                            onTap: () => _playTrackFromList(tracks, i),
+                            child: _trackArtwork(tracks[i]),
                           ),
                           trailing: IconButton(
                             icon: const Icon(Icons.remove_circle_outline),
                             onPressed: () => widget.libraryService.removeTrackFromPlaylist(
                               playlistId: playlist.id,
-                              trackId: track.id,
+                              trackId: tracks[i].id,
                             ),
                           ),
                         ),
@@ -337,7 +310,7 @@ class _MainShellState extends State<MainShell> {
   Widget _buildNowPlaying() {
     return StreamBuilder<PlayerState>(
       stream: widget.playerService.player.playerStateStream,
-      builder: (context, snapshot) {
+      builder: (context, _) {
         final current = widget.playerService.currentTrack;
         final playing = widget.playerService.player.playing;
         return Padding(
@@ -427,12 +400,19 @@ class _MainShellState extends State<MainShell> {
     );
   }
 
-  Future<void> _importLocalTracks() async {
-    await widget.libraryService.importLocalMp3s();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Import complete')),
-    );
+  Future<void> _importLocalTracks({String? playlistId}) async {
+    try {
+      await widget.libraryService.importLocalMp3s(playlistId: playlistId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Import complete')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Import failed: $error')),
+      );
+    }
   }
 
   Future<void> _runSearch() async {
@@ -454,17 +434,17 @@ class _MainShellState extends State<MainShell> {
     }
   }
 
-  Future<void> _download(YoutubeSearchItem item, DownloadFormat format) async {
+  Future<void> _download(YoutubeSearchItem item) async {
     setState(() => _downloading = true);
     try {
       final response = await widget.youtubeService.downloadWithFallback(
         item: item,
-        format: format,
+        format: DownloadFormat.mp3,
       );
       await widget.libraryService.addDownloadedTrack(
         title: response.title,
         absolutePath: response.filePath,
-        source: format == DownloadFormat.mp3 ? TrackSource.youtubeMp3 : TrackSource.youtubeMp4,
+        source: TrackSource.youtubeMp3,
         artworkUrl: response.thumbnail,
       );
       if (!mounted) return;
@@ -493,235 +473,7 @@ class _MainShellState extends State<MainShell> {
     setState(() => _tabIndex = 4);
   }
 
-  Widget _buildAuthCard() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            if (_authStatus.avatar != null && _authStatus.avatar!.isNotEmpty)
-              CircleAvatar(backgroundImage: NetworkImage(_authStatus.avatar!))
-            else
-              const CircleAvatar(child: Icon(Icons.person)),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                _authStatus.loggedIn
-                    ? 'Signed in as ${_authStatus.profileTitle ?? 'YouTube User'}'
-                    : 'Not signed in to YouTube',
-              ),
-            ),
-            if (_authStatus.loggedIn)
-              OutlinedButton(onPressed: _logoutYoutube, child: const Text('Logout'))
-            else
-              ElevatedButton(onPressed: _loginYoutube, child: const Text('Login')),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPersonalizedHome() {
-    if (_feedLoading) {
-      return const Card(
-        child: Padding(
-          padding: EdgeInsets.all(16),
-          child: Center(child: CircularProgressIndicator()),
-        ),
-      );
-    }
-    if (_homeItems.isEmpty) {
-      return const Card(
-        child: Padding(
-          padding: EdgeInsets.all(16),
-          child: Text('No recent personalized items found yet.'),
-        ),
-      );
-    }
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('YouTube Recent Feed', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            for (final item in _homeItems.take(8))
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: _artworkThumb(item.thumbnail, size: 38),
-                title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(item.channel, maxLines: 1, overflow: TextOverflow.ellipsis),
-                onTap: () => _openPreview(item),
-                trailing: IconButton(
-                  icon: const Icon(Icons.download_for_offline),
-                  onPressed: _downloading ? null : () => _download(item, DownloadFormat.mp3),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildYoutubePlaylistPanel() {
-    return Card(
-      child: ExpansionTile(
-        title: const Text('YouTube Playlists'),
-        subtitle: Text('${_youtubePlaylists.length} playlists'),
-        children: [
-          for (final playlist in _youtubePlaylists)
-            ListTile(
-              leading: playlist.thumbnail.isEmpty
-                  ? const Icon(Icons.playlist_play)
-                  : _artworkThumb(playlist.thumbnail, size: 40),
-              title: Text(playlist.title),
-              subtitle: Text('${playlist.itemCount} items'),
-              trailing: Wrap(
-                spacing: 8,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.library_music),
-                    tooltip: 'View items',
-                    onPressed: () => _viewYoutubePlaylistItems(playlist),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.download_for_offline),
-                    tooltip: 'Download playlist MP3',
-                    onPressed: () => _downloadYoutubePlaylist(playlist, DownloadFormat.mp3),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _loginYoutube() async {
-    setState(() => _authLoading = true);
-    try {
-      final url = await widget.youtubeService.startLogin();
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-      await Future<void>.delayed(const Duration(seconds: 2));
-      await _refreshAuthAndFeed();
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Login failed: $error')));
-    } finally {
-      if (mounted) setState(() => _authLoading = false);
-    }
-  }
-
-  Future<void> _logoutYoutube() async {
-    await widget.youtubeService.logout();
-    await _refreshAuthAndFeed();
-  }
-
-  Future<void> _refreshAuthAndFeed() async {
-    setState(() {
-      _feedLoading = true;
-      _authLoading = true;
-    });
-    try {
-      final status = await widget.youtubeService.authStatus();
-      final playlists = status.loggedIn ? await widget.youtubeService.playlists() : <YoutubePlaylist>[];
-      final home = status.loggedIn ? await widget.youtubeService.homeFeed() : <YoutubeSearchItem>[];
-      if (!mounted) return;
-      setState(() {
-        _authStatus = status;
-        _youtubePlaylists = playlists;
-        _homeItems = home;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _authStatus = const YoutubeAuthStatus(loggedIn: false);
-        _youtubePlaylists = <YoutubePlaylist>[];
-        _homeItems = <YoutubeSearchItem>[];
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _feedLoading = false;
-          _authLoading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _downloadYoutubePlaylist(YoutubePlaylist playlist, DownloadFormat format) async {
-    setState(() => _downloading = true);
-    try {
-      final items = await widget.youtubeService.downloadPlaylist(
-        playlistId: playlist.id,
-        format: format,
-      );
-      for (final result in items) {
-        await widget.libraryService.addDownloadedTrack(
-          title: result.title,
-          absolutePath: result.filePath,
-          source: format == DownloadFormat.mp3 ? TrackSource.youtubeMp3 : TrackSource.youtubeMp4,
-        );
-      }
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Downloaded ${items.length} tracks from ${playlist.title}')),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Playlist download failed: $error')),
-      );
-    } finally {
-      if (mounted) setState(() => _downloading = false);
-    }
-  }
-
-  Future<void> _viewYoutubePlaylistItems(YoutubePlaylist playlist) async {
-    try {
-      final items = await widget.youtubeService.playlistItems(playlist.id);
-      if (!mounted) return;
-      await showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        builder: (context) {
-          return SafeArea(
-            child: SizedBox(
-              height: MediaQuery.of(context).size.height * 0.75,
-              child: ListView(
-                padding: const EdgeInsets.all(12),
-                children: [
-                  Text(playlist.title, style: Theme.of(context).textTheme.titleLarge),
-                  const SizedBox(height: 12),
-                  for (final item in items)
-                    ListTile(
-                      leading: _artworkThumb(item.thumbnail, size: 40),
-                      title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(item.channel),
-                      onTap: () => _openPreview(item),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.download_for_offline),
-                        onPressed: () => _download(item, DownloadFormat.mp3),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          );
-        },
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load playlist items: $error')),
-      );
-    }
-  }
-
   Future<void> _openPreview(YoutubeSearchItem item) async {
-    bool audioOnly = false;
     final controller = YoutubePlayerController.fromVideoId(
       videoId: item.videoId,
       autoPlay: true,
@@ -731,73 +483,25 @@ class _MainShellState extends State<MainShell> {
       context: context,
       isScrollControlled: true,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-                        ),
-                        Switch(
-                          value: audioOnly,
-                          onChanged: (value) {
-                            setModalState(() => audioOnly = value);
-                            controller.setVolume(value ? 100 : 100);
-                          },
-                        ),
-                        const Text('Audio only'),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    if (audioOnly)
-                      const SizedBox(
-                        height: 120,
-                        child: Center(
-                          child: Text('Audio-only preview enabled'),
-                        ),
-                      )
-                    else
-                      AspectRatio(
-                        aspectRatio: 16 / 9,
-                        child: YoutubePlayer(controller: controller),
-                      ),
-                  ],
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 8),
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: YoutubePlayer(controller: controller),
                 ),
-              ),
-            );
-          },
+              ],
+            ),
+          ),
         );
       },
     );
     controller.close();
-  }
-
-  Future<void> _loadBackendUrl() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString('backend_url');
-    if (saved == null || saved.trim().isEmpty) return;
-    widget.youtubeService.setBaseUrl(saved);
-    if (!mounted) return;
-    setState(() => _backendUrlController.text = saved);
-  }
-
-  Future<void> _saveBackendUrl() async {
-    final value = _backendUrlController.text.trim();
-    if (value.isEmpty) return;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('backend_url', value);
-    widget.youtubeService.setBaseUrl(value);
-    await _refreshAuthAndFeed();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Backend URL saved: $value')),
-    );
   }
 
   Widget _trackArtwork(Track track) {
@@ -812,6 +516,18 @@ class _MainShellState extends State<MainShell> {
   }
 
   Widget _artworkThumb(String url, {double size = 48}) {
+    if (url.isEmpty) {
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        alignment: Alignment.center,
+        child: const Icon(Icons.music_note, color: Colors.white70),
+      );
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Image.network(

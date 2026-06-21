@@ -46,7 +46,7 @@ class MusicLibraryService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> importLocalMp3s() async {
+  Future<void> importLocalMp3s({String? playlistId}) async {
     await _requestImportPermission();
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -59,25 +59,36 @@ class MusicLibraryService extends ChangeNotifier {
     final importDir = Directory(p.join(appDocDir.path, 'imports'));
     if (!importDir.existsSync()) importDir.createSync(recursive: true);
 
+    final importedTrackIds = <String>[];
+
     for (final file in result.files) {
       final sourcePath = file.path;
       if (sourcePath == null) continue;
       final fileName = p.basename(sourcePath);
       final destination = p.join(importDir.path, fileName);
+
+      final existingIndex = _tracks.indexWhere((track) => track.path == destination);
+      if (existingIndex != -1) {
+        importedTrackIds.add(_tracks[existingIndex].id);
+        continue;
+      }
+
       await File(sourcePath).copy(destination);
-
-      final alreadyAdded = _tracks.any((track) => track.path == destination);
-      if (alreadyAdded) continue;
-
       final parsed = _parseTrackName(fileName);
-      _tracks.add(
-        Track(
-          id: _uuid.v4(),
-          title: parsed.$2,
-          artist: parsed.$1,
-          path: destination,
-        ),
+      final track = Track(
+        id: _uuid.v4(),
+        title: parsed.$2,
+        artist: parsed.$1,
+        path: destination,
       );
+      _tracks.add(track);
+      importedTrackIds.add(track.id);
+    }
+
+    if (playlistId != null) {
+      for (final trackId in importedTrackIds) {
+        _addTrackIdToPlaylist(playlistId: playlistId, trackId: trackId);
+      }
     }
 
     await _saveAll();
@@ -90,6 +101,9 @@ class MusicLibraryService extends ChangeNotifier {
     required TrackSource source,
     String? artworkUrl,
   }) async {
+    final existing = _tracks.indexWhere((track) => track.path == absolutePath);
+    if (existing != -1) return;
+
     _tracks.add(
       Track(
         id: _uuid.v4(),
@@ -126,14 +140,7 @@ class MusicLibraryService extends ChangeNotifier {
     required String playlistId,
     required String trackId,
   }) async {
-    final index = _playlists.indexWhere((playlist) => playlist.id == playlistId);
-    if (index == -1) return;
-
-    final playlist = _playlists[index];
-    if (playlist.trackIds.contains(trackId)) return;
-    _playlists[index] = playlist.copyWith(
-      trackIds: <String>[...playlist.trackIds, trackId],
-    );
+    _addTrackIdToPlaylist(playlistId: playlistId, trackId: trackId);
     await _saveAll();
     notifyListeners();
   }
@@ -161,6 +168,20 @@ class MusicLibraryService extends ChangeNotifier {
     if (playlist.id.isEmpty) return const <Track>[];
     final trackMap = <String, Track>{for (final track in _tracks) track.id: track};
     return playlist.trackIds.map((id) => trackMap[id]).whereType<Track>().toList();
+  }
+
+  void _addTrackIdToPlaylist({
+    required String playlistId,
+    required String trackId,
+  }) {
+    final index = _playlists.indexWhere((playlist) => playlist.id == playlistId);
+    if (index == -1) return;
+
+    final playlist = _playlists[index];
+    if (playlist.trackIds.contains(trackId)) return;
+    _playlists[index] = playlist.copyWith(
+      trackIds: <String>[...playlist.trackIds, trackId],
+    );
   }
 
   Future<void> _saveAll() async {

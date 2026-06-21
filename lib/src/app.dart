@@ -33,6 +33,7 @@ class _RedBlackPlayerAppState extends State<RedBlackPlayerApp> {
   @override
   void dispose() {
     _playerService.dispose();
+    _youtubeService.close();
     _libraryService.dispose();
     super.dispose();
   }
